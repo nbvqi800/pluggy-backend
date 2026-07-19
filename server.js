@@ -208,6 +208,26 @@ function extrairParcelamentos(transacoes) {
     }));
 }
 
+/* O BTG descreve um PIX só como "Pix" — quem mandou o dinheiro vem em
+   paymentData, que estava sendo descartado. Sem isso, meia dúzia de linhas
+   idênticas chamadas "Pix" no extrato, sem como saber de quem veio.
+   Numa entrada o interessante é o pagador; numa saída, o recebedor. */
+function descricaoRica(t) {
+  const base = String(t.description || t.descriptionRaw || '').trim();
+  const pd = t.paymentData || null;
+  const outro = pd && (t.type === 'CREDIT' ? pd.payer : pd.receiver);
+  const nome = String(
+    (outro && outro.name)
+    || (t.merchant && (t.merchant.name || t.merchant.businessName))
+    || ''
+  ).trim();
+  if (!nome) return base;
+  // Não repete o nome quando a descrição já o traz.
+  const j = base.toLowerCase();
+  if (j && j.includes(nome.toLowerCase().slice(0, 12))) return base;
+  return base ? `${base} - ${nome}` : nome;
+}
+
 function mapear(accounts, txsPorConta, investments, identidade) {
   const contas = [];
   const cartoes = [];
@@ -279,7 +299,7 @@ function mapear(accounts, txsPorConta, investments, identidade) {
       transacoes.push({
         id: idTx++,
         data: dataLocal(t.date),
-        desc: t.description || t.descriptionRaw || '',
+        desc: descricaoRica(t),
         // O MCC vive em creditCardMetadata.payeeMCC. NÃO existe merchant.mcc —
         // era isso que deixava o motor de categorização por MCC sem sinal.
         mcc: (m && typeof m.payeeMCC === 'number') ? m.payeeMCC : null,
