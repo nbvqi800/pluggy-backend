@@ -54,9 +54,62 @@ async function coletarInvestimentos() {
   if (!pluggy || !ITEM_IDS.length) return [];
   const todos = [];
   for (const itemId of ITEM_IDS) {
-    try { todos.push(...((await pluggy.fetchInvestments(itemId)).results || [])); } catch (_) {}
+    let invs = [];
+    try { invs = (await pluggy.fetchInvestments(itemId)).results || []; } catch (_) {}
+    for (const inv of invs) {
+      // Movimentações do ativo = aportes/resgates ao longo do tempo. Nem todo
+      // conector fornece; quando não vem, fica lista vazia (sem aporte).
+      let movs = [];
+      if (typeof pluggy.fetchInvestmentTransactions === 'function') {
+        try { movs = (await pluggy.fetchInvestmentTransactions(inv.id)).results || []; } catch (_) {}
+      }
+      inv._movs = movs;
+      todos.push(inv);
+    }
   }
   return todos;
+}
+
+/* Aporte = dinheiro que ENTROU no investimento (você comprou/transferiu para
+   dentro). Resgate = dinheiro que SAIU. movementType dá a direção; excluímos
+   INTEREST/TAX/AMORTIZATION porque são rendimento/imposto, não capital seu. */
+const TIPOS_APORTE = new Set(['BUY', 'TRANSFER']);
+const TIPOS_RESGATE = new Set(['SELL', 'TRANSFER', 'WITHDRAWAL']);
+const ehAporte = (t) => t.movementType === 'CREDIT' && TIPOS_APORTE.has(t.type);
+const ehResgate = (t) => t.movementType === 'DEBIT' && TIPOS_RESGATE.has(t.type);
+
+/* Percorre as movimentações e devolve o que a tela de aportes precisa. */
+function resumirAportes(investimentos) {
+  const porMes = {}; // 'AAAA-MM' -> { aportes, resgates }
+  let totalAportado = 0;
+  let totalResgatado = 0;
+
+  for (const i of investimentos) {
+    let aportado = 0;
+    let resgatado = 0;
+    for (const t of (i._movs || [])) {
+      const money = Math.abs(num(t.amount));
+      if (!money) continue;
+      const mes = String(t.date || t.tradeDate || '').slice(0, 7);
+      if (ehAporte(t)) {
+        aportado += money;
+        if (mes) (porMes[mes] ||= { aportes: 0, resgates: 0 }).aportes += money;
+      } else if (ehResgate(t)) {
+        resgatado += money;
+        if (mes) (porMes[mes] ||= { aportes: 0, resgates: 0 }).resgates += money;
+      }
+    }
+    i._aportado = +aportado.toFixed(2);
+    i._resgatado = +resgatado.toFixed(2);
+    totalAportado += aportado;
+    totalResgatado += resgatado;
+  }
+
+  const mensal = Object.entries(porMes)
+    .map(([mes, v]) => ({ mes, aportes: +v.aportes.toFixed(2), resgates: +v.resgates.toFixed(2) }))
+    .sort((a, b) => a.mes.localeCompare(b.mes));
+
+  return { totalAportado: +totalAportado.toFixed(2), totalResgatado: +totalResgatado.toFixed(2), mensal };
 }
 
 /* ---------- token (idêntico ao server.js) ---------- */
@@ -114,38 +167,26 @@ app.get('/meus-dados', exigirAuth, async (_req, res) => {
   }
 });
 
-/* TEMPORÁRIO — descobre se a Pluggy/BTG fornece as movimentações (aportes) dos
-   investimentos. NÃO expõe nomes de ativos nem valores: só contagens, tipos e a
-   LISTA de campos disponíveis. Aberto (sem token) só para você abrir no
-   navegador. Remover depois de decidir sobre a tela de aportes. */
+/* TEMPORÁRIO — verificação dos totais de aporte (sem nome de ativo). Serve para
+   você conferir se os números batem antes de a tela ser construída. Aberto (sem
+   token) só para abrir no navegador. Remover depois de validar. */
 app.get('/teste-aportes', async (_req, res) => {
   try {
-    if (!pluggy || !ITEM_IDS.length) return res.json({ erro: 'sem_pluggy_ou_itemids' });
-    if (typeof pluggy.fetchInvestmentTransactions !== 'function') {
-      return res.json({ erro: 'metodo_indisponivel_no_sdk' });
-    }
-    const detalhe = [];
-    for (const itemId of ITEM_IDS) {
-      const invs = (await pluggy.fetchInvestments(itemId)).results || [];
-      for (const inv of invs) {
-        let txs = [];
-        let falhou = null;
-        try { txs = (await pluggy.fetchInvestmentTransactions(inv.id)).results || []; }
-        catch (e) { falhou = e.message; }
-        detalhe.push({
-          classe: inv.type || null,
-          qtdMovimentos: txs.length,
-          tipos: [...new Set(txs.map((t) => t.type).filter(Boolean))],
-          movimentos: [...new Set(txs.map((t) => t.movementType).filter(Boolean))],
-          campos: txs[0] ? Object.keys(txs[0]) : [],
-          erro: falhou,
-        });
-      }
-    }
+    const investimentos = await coletarInvestimentos();
+    if (!investimentos.length) return res.json({ erro: 'sem_investimentos' });
+    const resumo = resumirAportes(investimentos);
+    const valorAtual = investimentos.reduce((s, i) => s + (typeof i.balance === 'number' ? i.balance : (i.amount || 0)), 0);
+    const capitalLiquido = resumo.totalAportado - resumo.totalResgatado;
+    const rentabilidade = valorAtual - capitalLiquido;
     res.json({
-      totalInvestimentos: detalhe.length,
-      comMovimentacoes: detalhe.filter((d) => d.qtdMovimentos > 0).length,
-      detalhe,
+      ativos: investimentos.length,
+      totalAportado: resumo.totalAportado,
+      totalResgatado: resumo.totalResgatado,
+      capitalLiquidoInvestido: +capitalLiquido.toFixed(2),
+      valorAtual: +valorAtual.toFixed(2),
+      rentabilidadeReais: +rentabilidade.toFixed(2),
+      rentabilidadePct: capitalLiquido > 0 ? +((rentabilidade / capitalLiquido) * 100).toFixed(2) : null,
+      aportesMensais: resumo.mensal,
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -329,11 +370,14 @@ function mapear(accounts, transacoesRaw, bills, installmentsData, investments) {
     });
   }
 
+  const resumoAportes = resumirAportes(investments || []);
   const investimentos = (investments || []).map((i) => ({
     nome: i.name || i.issuer || i.type || 'Investimento',
     classe: i.type || 'Investimento',
     valor: typeof i.balance === 'number' ? i.balance : (i.amount || 0),
     rendimento: rendimentoInv(i),
+    aportado: i._aportado || 0,
+    resgatado: i._resgatado || 0,
   }));
 
   const dono = tituloCaso((accounts.find((a) => a.owner) || {}).owner || '');
@@ -344,6 +388,7 @@ function mapear(accounts, transacoesRaw, bills, installmentsData, investments) {
     cartao: cartoes[0] || null,
     transacoes,
     investimentos,
+    aportesMensais: resumoAportes.mensal,
     parcelamentos,
     avisos,
   };
