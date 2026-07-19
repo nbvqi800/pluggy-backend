@@ -5,6 +5,7 @@
   "type": "commonjs",
   "scripts": {
     "start": "node server.js"
+        "start:pierre": "node server-pierre.js",
   },
   "engines": {
     "node": ">=18"
