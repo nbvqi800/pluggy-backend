@@ -114,6 +114,44 @@ app.get('/meus-dados', exigirAuth, async (_req, res) => {
   }
 });
 
+/* TEMPORÁRIO — descobre se a Pluggy/BTG fornece as movimentações (aportes) dos
+   investimentos. NÃO expõe nomes de ativos nem valores: só contagens, tipos e a
+   LISTA de campos disponíveis. Aberto (sem token) só para você abrir no
+   navegador. Remover depois de decidir sobre a tela de aportes. */
+app.get('/teste-aportes', async (_req, res) => {
+  try {
+    if (!pluggy || !ITEM_IDS.length) return res.json({ erro: 'sem_pluggy_ou_itemids' });
+    if (typeof pluggy.fetchInvestmentTransactions !== 'function') {
+      return res.json({ erro: 'metodo_indisponivel_no_sdk' });
+    }
+    const detalhe = [];
+    for (const itemId of ITEM_IDS) {
+      const invs = (await pluggy.fetchInvestments(itemId)).results || [];
+      for (const inv of invs) {
+        let txs = [];
+        let falhou = null;
+        try { txs = (await pluggy.fetchInvestmentTransactions(inv.id)).results || []; }
+        catch (e) { falhou = e.message; }
+        detalhe.push({
+          classe: inv.type || null,
+          qtdMovimentos: txs.length,
+          tipos: [...new Set(txs.map((t) => t.type).filter(Boolean))],
+          movimentos: [...new Set(txs.map((t) => t.movementType).filter(Boolean))],
+          campos: txs[0] ? Object.keys(txs[0]) : [],
+          erro: falhou,
+        });
+      }
+    }
+    res.json({
+      totalInvestimentos: detalhe.length,
+      comMovimentacoes: detalhe.filter((d) => d.qtdMovimentos > 0).length,
+      detalhe,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 /* Sincroniza no Pierre antes de buscar (equivale ao "atualizar" do Pluggy). */
 app.post('/atualizar', exigirAuth, async (_req, res) => {
   try {
