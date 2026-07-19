@@ -78,6 +78,14 @@ const TIPOS_RESGATE = new Set(['SELL', 'TRANSFER', 'WITHDRAWAL']);
 const ehAporte = (t) => t.movementType === 'CREDIT' && TIPOS_APORTE.has(t.type);
 const ehResgate = (t) => t.movementType === 'DEBIT' && TIPOS_RESGATE.has(t.type);
 
+/* A Pluggy devolve a data como objeto Date (não string ISO); String().slice()
+   gerava "Fri Mar". Converte para 'AAAA-MM' com segurança. */
+function mesISO(v) {
+  if (!v) return '';
+  const d = (v instanceof Date) ? v : new Date(v);
+  return isNaN(d.getTime()) ? String(v).slice(0, 7) : d.toISOString().slice(0, 7);
+}
+
 /* Percorre as movimentações e devolve o que a tela de aportes precisa. */
 function resumirAportes(investimentos) {
   const porMes = {}; // 'AAAA-MM' -> { aportes, resgates }
@@ -90,7 +98,7 @@ function resumirAportes(investimentos) {
     for (const t of (i._movs || [])) {
       const money = Math.abs(num(t.amount));
       if (!money) continue;
-      const mes = String(t.date || t.tradeDate || '').slice(0, 7);
+      const mes = mesISO(t.date || t.tradeDate);
       if (ehAporte(t)) {
         aportado += money;
         if (mes) (porMes[mes] ||= { aportes: 0, resgates: 0 }).aportes += money;
@@ -174,19 +182,47 @@ app.get('/teste-aportes', async (_req, res) => {
   try {
     const investimentos = await coletarInvestimentos();
     if (!investimentos.length) return res.json({ erro: 'sem_investimentos' });
+
+    // (1) Reconstrução via transações (o que já tínhamos, com data corrigida).
     const resumo = resumirAportes(investimentos);
-    const valorAtual = investimentos.reduce((s, i) => s + (typeof i.balance === 'number' ? i.balance : (i.amount || 0)), 0);
-    const capitalLiquido = resumo.totalAportado - resumo.totalResgatado;
-    const rentabilidade = valorAtual - capitalLiquido;
+
+    // (2) Soma por tipo de movimento — mostra de onde vem o resgate inflado.
+    const porTipo = {};
+    for (const i of investimentos) {
+      for (const t of (i._movs || [])) {
+        const k = `${t.type}/${t.movementType}`;
+        (porTipo[k] ||= { soma: 0, n: 0 });
+        porTipo[k].soma += Math.abs(num(t.amount));
+        porTipo[k].n += 1;
+      }
+    }
+    for (const k in porTipo) porTipo[k].soma = +porTipo[k].soma.toFixed(2);
+
+    // (3) Campos que a própria Pluggy fornece por ativo (caminho confiável).
+    let somaOriginal = 0; let comOriginal = 0;
+    let somaProfit = 0; let comProfit = 0;
+    let somaAtual = 0;
+    for (const i of investimentos) {
+      somaAtual += (typeof i.balance === 'number' ? i.balance : (i.amount || 0));
+      if (typeof i.amountOriginal === 'number') { somaOriginal += i.amountOriginal; comOriginal++; }
+      if (typeof i.amountProfit === 'number') { somaProfit += i.amountProfit; comProfit++; }
+    }
+
     res.json({
       ativos: investimentos.length,
-      totalAportado: resumo.totalAportado,
-      totalResgatado: resumo.totalResgatado,
-      capitalLiquidoInvestido: +capitalLiquido.toFixed(2),
-      valorAtual: +valorAtual.toFixed(2),
-      rentabilidadeReais: +rentabilidade.toFixed(2),
-      rentabilidadePct: capitalLiquido > 0 ? +((rentabilidade / capitalLiquido) * 100).toFixed(2) : null,
-      aportesMensais: resumo.mensal,
+      valorAtual: +somaAtual.toFixed(2),
+      viaTransacoes: {
+        totalAportado: resumo.totalAportado,
+        totalResgatado: resumo.totalResgatado,
+        porTipo,
+        aportesMensais: resumo.mensal,
+      },
+      viaCamposPluggy: {
+        ativosComValorAplicado: comOriginal,
+        somaValorAplicado: +somaOriginal.toFixed(2),
+        ativosComLucro: comProfit,
+        somaLucro: +somaProfit.toFixed(2),
+      },
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
